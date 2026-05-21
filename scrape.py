@@ -30,7 +30,7 @@ ROW_COUNT = 30
 DELAY = 0.5
 
 # 連續碰到幾個已知 ID 才提早停止翻頁
-EARLY_STOP_THRESHOLD = 5
+EARLY_STOP_THRESHOLD = 10
 
 TW = timezone(timedelta(hours=8))
 
@@ -180,14 +180,7 @@ def build_rss(events: list[dict]) -> str:
         guid = SubElement(item, "guid", isPermaLink="false")
         guid.text = hashlib.md5(event_id.encode()).hexdigest()
 
-        events_list = e.get("events", [])
-        first_ts = events_list[0].get("startDateTime") if events_list else None
-        if first_ts:
-            pub_dt = datetime.fromtimestamp(first_ts, tz=TW)
-            pub_date = pub_dt.strftime("%a, %d %b %Y %H:%M:%S %z")
-        else:
-            pub_date = now_str
-        SubElement(item, "pubDate").text = pub_date
+        SubElement(item, "pubDate").text = now_str
 
         desc_text = format_event_description(e)
         SubElement(item, "description").text = desc_text
