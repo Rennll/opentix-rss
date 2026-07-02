@@ -5,10 +5,12 @@ OPENTIX 全新登場 → RSS feed 產生器
 """
 
 import os
+import sys
 import json
 import time
 import hashlib
 import logging
+import html
 import requests
 from datetime import datetime, timezone, timedelta
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -30,7 +32,7 @@ ROW_COUNT = 30
 DELAY = 0.5
 
 # 連續碰到幾個已知 ID 才提早停止翻頁
-EARLY_STOP_THRESHOLD = 10
+EARLY_STOP_THRESHOLD = 5
 
 TW = timezone(timedelta(hours=8))
 
@@ -67,7 +69,14 @@ def fetch_all_events(seen_ids: set[str]) -> tuple[list[dict], bool]:
     """
     翻頁抓取節目。
     API 為新的在前，碰到連續 EARLY_STOP_THRESHOLD 個已知 ID 時提早停止。
-    回傳 (所有抓到的節目, 是否正常完成)。
+
+    回傳 (all_events, success)：
+    - success=True  時 all_events 是完整、可信賴的抓取結果，呼叫端可以用來更新
+      feed.xml 與 seen_ids.json。
+    - success=False 時代表抓取中途出錯，all_events 只包含錯誤發生前抓到的部分，
+      不完整。呼叫端絕對不能用這份不完整的資料更新 seen_ids.json（否則會讓
+      未抓到的新節目被誤判為「已知」，之後永遠不會被推送）。正確做法是整批捨棄，
+      等下次排程重跑。
     """
     all_events = []
     page = 1
@@ -80,13 +89,17 @@ def fetch_all_events(seen_ids: set[str]) -> tuple[list[dict], bool]:
         try:
             resp = requests.get(url, headers=HEADERS, timeout=15)
             resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            log.error(f"API 請求失敗（第 {page} 頁）：{e}")
-            return all_events, False  # 中斷，標記為不完整
+        except requests.RequestException as e:
+            log.error(f"網路請求失敗（第 {page} 頁），可能是暫時性問題，等下次重跑：{e}")
+            return all_events, False
 
-        result = data.get("result", {})
-        items = result.get("contentData", [])
+        try:
+            data = resp.json()
+            result = data["result"]
+            items = result.get("contentData", [])
+        except (KeyError, ValueError) as e:
+            log.error(f"回應格式異常（第 {page} 頁），API 可能已改版，需要檢查程式：{e}")
+            return all_events, False
 
         if not items:
             log.info("沒有更多資料，結束翻頁")
@@ -102,7 +115,10 @@ def fetch_all_events(seen_ids: set[str]) -> tuple[list[dict], bool]:
             all_events.append(item)
 
             if consecutive_seen >= EARLY_STOP_THRESHOLD:
-                log.info(f"連續 {EARLY_STOP_THRESHOLD} 個已知節目，提早停止翻頁")
+                log.info(
+                    f"連續 {EARLY_STOP_THRESHOLD} 個已知節目，提早停止翻頁"
+                    f"（第 {page} 頁、目前累計 {len(all_events)} 筆）"
+                )
                 return all_events, True
 
         log.info(f"  第 {page} 頁取得 {len(items)} 筆，累計 {len(all_events)} 筆")
@@ -144,8 +160,10 @@ def format_event_description(e: dict) -> str:
         else:
             lines.append(f"🎟 票價：${min_p:,} - ${max_p:,}")
 
-    age = e.get("ageRestriction") or e.get("filmRating")
-    if age:
+    age = e.get("ageRestriction")
+    if age is None:
+        age = e.get("filmRating")
+    if age is not None and age != "":
         lines.append(f"👶 限制：{age}")
 
     return "\n".join(lines)
@@ -186,10 +204,14 @@ def build_rss(events: list[dict]) -> str:
         SubElement(item, "description").text = desc_text
 
         if image_url:
+            safe_image_url = html.escape(image_url, quote=True)
+            safe_image_alt = html.escape(image_alt, quote=True)
+            safe_event_url = html.escape(event_url, quote=True)
+            safe_desc_text = html.escape(desc_text)
             html_content = (
-                f'<img src="{image_url}" alt="{image_alt}" style="max-width:100%"/>'
-                f"<br/><pre>{desc_text}</pre>"
-                f'<br/><a href="{event_url}">→ 查看詳情與購票</a>'
+                f'<img src="{safe_image_url}" alt="{safe_image_alt}" style="max-width:100%"/>'
+                f"<br/><pre>{safe_desc_text}</pre>"
+                f'<br/><a href="{safe_event_url}">→ 查看詳情與購票</a>'
             )
             SubElement(item, "content:encoded").text = html_content
             SubElement(item, "media:content", url=image_url, medium="image")
@@ -207,24 +229,23 @@ def main():
 
     all_events, success = fetch_all_events(seen_ids)
 
+    if not success:
+        log.error("抓取中途發生錯誤，本次不更新 feed 與 seen_ids，等下次重跑")
+        sys.exit(1)
+
     if not all_events:
         log.error("沒有抓到任何節目，終止")
-        return
-
-    if not success:
-        log.warning("抓取中途發生錯誤，本次不更新 feed 與 seen_ids，等下次重跑")
-        return
+        sys.exit(1)
 
     # 過濾出新節目
     new_events = [e for e in all_events if e.get("id") not in seen_ids]
     log.info(f"本次新增：{len(new_events)} 筆（共抓到 {len(all_events)} 筆）")
 
+    all_ids = seen_ids | {e["id"] for e in all_events if e.get("id")}
+
     if not new_events:
         log.info("沒有新節目，不更新 feed")
-        # 仍然更新 seen_ids，確保抓到的舊節目也被記錄
-        all_ids = seen_ids | {e["id"] for e in all_events if e.get("id")}
-        if all_ids != seen_ids:
-            save_seen_ids(all_ids)
+        save_seen_ids(all_ids)
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -234,7 +255,6 @@ def main():
         f.write(xml_str)
     log.info("已輸出 feed.xml")
 
-    all_ids = seen_ids | {e["id"] for e in all_events if e.get("id")}
     save_seen_ids(all_ids)
 
 
