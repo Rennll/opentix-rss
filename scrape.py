@@ -169,7 +169,7 @@ def format_event_description(e: dict) -> str:
     return "\n".join(lines)
 
 
-def build_rss(events: list[dict]) -> str:
+def build_rss(events: list[dict], now_str: str) -> str:
     rss = Element("rss", version="2.0")
     rss.set("xmlns:content", "http://purl.org/rss/1.0/modules/content/")
     rss.set("xmlns:media", "http://search.yahoo.com/mrss/")
@@ -180,7 +180,6 @@ def build_rss(events: list[dict]) -> str:
     SubElement(channel, "description").text = "OPENTIX 兩廳院文化生活 每週新上架節目"
     SubElement(channel, "language").text = "zh-TW"
 
-    now_str = datetime.now(TW).strftime("%a, %d %b %Y %H:%M:%S %z")
     SubElement(channel, "lastBuildDate").text = now_str
 
     for e in events:
@@ -250,7 +249,8 @@ def main():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    xml_str = build_rss(new_events)
+    now_str = datetime.now(TW).strftime("%a, %d %b %Y %H:%M:%S %z")
+    xml_str = build_rss(new_events, now_str)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(xml_str)
     log.info("已輸出 feed.xml")
