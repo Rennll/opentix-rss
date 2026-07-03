@@ -32,7 +32,7 @@ ROW_COUNT = 30
 DELAY = 0.5
 
 # 連續碰到幾個已知 ID 才提早停止翻頁
-EARLY_STOP_THRESHOLD = 5
+EARLY_STOP_THRESHOLD = 10
 
 TW = timezone(timedelta(hours=8))
 
